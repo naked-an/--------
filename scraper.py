@@ -1,113 +1,106 @@
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
+import requests
 from bs4 import BeautifulSoup
-import json
-import time
-from webdriver_manager.chrome import ChromeDriverManager
 
 def scrape_netkeiba_shutuba(race_id):
     """
-    netkeibaの出馬表ページから基本的なレース情報をスクレイピングする関数
-    (Selenium + フルネーム抽出アップデート版)
+    netkeibaの出馬表ページからデータをスクレイピングする (requests + BeautifulSoup版)
     """
     url = f"https://race.netkeiba.com/race/shutuba.html?race_id={race_id}"
-    
-    # Chromeを裏側(ヘッドレス)で動かすための設定
-    options = Options()
-    options.add_argument('--headless')
-    options.add_argument('--no-sandbox')
-    options.add_argument('--disable-dev-shm-usage')
-    options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36')
+    print(f"🌐 [取得中] {url} にアクセスしています...")
 
-    print(f"🌐 [取得中] {url} に本物のブラウザ経由でアクセスしています...")
-    
+    # 一般的なブラウザを偽装するUser-Agent
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept-Language': 'ja,en-US;q=0.9,en;q=0.8',
+    }
+
     try:
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=options)
+        # ページの取得
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status() # エラー（404, 403など）があれば例外を発生させる
         
-        driver.get(url)
-        time.sleep(3) # JavaScriptの描画待ち
+        # エンコーディングの自動推測（文字化け防止）
+        response.encoding = response.apparent_encoding
         
-        html = driver.page_source
-        driver.quit()
-        
-        soup = BeautifulSoup(html, 'html.parser')
-        
-        # --- レース基本情報の取得 ---
-        race_name = soup.select_one('.RaceName').text.strip() if soup.select_one('.RaceName') else "レース名不明"
-        
-        race_data = {
-            "raceName": race_name,
-            "horses": []
-        }
-        
-        print(f"✅ レース名: {race_name} のデータを解析します。\n")
+        soup = BeautifulSoup(response.content, 'html.parser')
 
-        # --- 出走馬データの取得 ---
+        # レース名の取得
+        race_name_elem = soup.select_one('.RaceName')
+        if not race_name_elem:
+            print("❌ レース名が見つかりませんでした。ページ構造が変わったか、アクセスがブロックされている可能性があります。")
+            # デバッグ用にHTMLの一部を出力
+            print(f"取得したHTMLの一部: {soup.prettify()[:500]}")
+            return None
+            
+        race_name = race_name_elem.text.strip()
+        print(f"✅ レース名: {race_name} のデータを解析します。")
+
+        horses = []
+        # 出馬表の行を取得（クラス名に 'HorseList' が含まれる行）
         horse_rows = soup.select('.HorseList')
         
+        if not horse_rows:
+            print("❌ 出走馬のデータが見つかりませんでした。")
+            return None
+
         for row in horse_rows:
             horse_info = {}
             
-            # 馬番
-            umaban_elem = row.select_one('td.Umaban')
+            # 馬番 (枠色によって Umaban1, Umaban2... とクラスが変わるため前方一致で取得)
+            umaban_elem = row.select_one('td[class^="Umaban"]')
             if umaban_elem:
                 try:
                     horse_info["number"] = int(umaban_elem.text.strip())
                 except ValueError:
-                    continue
+                    continue # 馬番がない行(取消など)はスキップ
+            else:
+                 continue
                 
-            # 馬名 (念のためtitle属性も確認)
+            # 馬名
             name_elem = row.select_one('.HorseName a')
             if name_elem:
-                horse_info["name"] = name_elem.get('title') or name_elem.text.strip()
-                
-            # 騎手 (★ここを修正！表面の文字ではなくtitle属性からフルネームを狙い撃ち)
+                horse_info["name"] = name_elem.text.strip()
+            else:
+                continue
+
+            # 騎手
             jockey_elem = row.select_one('.Jockey a')
             if jockey_elem:
-                full_name = jockey_elem.get('title')
-                if full_name:
-                    horse_info["jockey"] = full_name.strip()
-                else:
-                    horse_info["jockey"] = jockey_elem.text.strip()
-
-            # オッズ
-            odds_elem = row.select_one('td.Txt_R span')
-            if odds_elem and odds_elem.text.strip() != '---':
-                try:
-                    horse_info["odds"] = float(odds_elem.text.strip())
-                except ValueError:
-                    horse_info["odds"] = 0.0
+                horse_info["jockey"] = jockey_elem.text.strip()
             else:
-                horse_info["odds"] = 99.9 
+                horse_info["jockey"] = "不明"
 
-            # EquiSense用ダミーパラメータ
-            horse_info["baseScore"] = 70
-            horse_info["jockeySkill"] = 7.0
-            horse_info["variance"] = 10
-            horse_info["runStyle"] = "先行"
-            horse_info["tags"] = []
-            
-            if "name" in horse_info:
-                race_data["horses"].append(horse_info)
-                print(f"🐎 {horse_info.get('number', '?')}番 {horse_info['name']} (騎手: {horse_info.get('jockey', '?')})")
+            # オッズ (Txt_R は右揃えのテキストクラス。オッズが入っていることが多い)
+            odds_elem = row.select_one('.Txt_R span')
+            if odds_elem:
+                 try:
+                     # '---' や取消などで数値に変換できない場合を考慮
+                     odds_str = odds_elem.text.strip()
+                     if odds_str == '---' or not odds_str:
+                         horse_info["odds"] = 99.9
+                     else:
+                        horse_info["odds"] = float(odds_str)
+                 except ValueError:
+                     horse_info["odds"] = 99.9
+            else:
+                horse_info["odds"] = 99.9
 
-        return race_data
+            horses.append(horse_info)
+            print(f"🐎 {horse_info.get('number', '?')}番 {horse_info.get('name', '不明')} (騎手: {horse_info.get('jockey', '不明')}) - オッズ: {horse_info.get('odds', 99.9)}")
 
+        return {
+            "raceName": race_name,
+            "horses": horses
+        }
+
+    except requests.exceptions.RequestException as e:
+        print(f"❌ ネットワークエラーまたはアクセス拒否: {e}")
+        return None
     except Exception as e:
-        print(f"❌ エラーが発生しました: {e}")
+        print(f"❌ 解析エラー: {e}")
         return None
 
+# テスト実行用 (このファイルを直接実行した時だけ動く)
 if __name__ == "__main__":
-    # テストとして2024年 皐月賞のIDを指定
-    test_race_id = "202406030811"
-    
-    print("🚀 スクレイピングを開始します...\n")
-    
-    result_data = scrape_netkeiba_shutuba(test_race_id)
-    
-    if result_data:
-        print("\n✨ --- 取得完了・JSONフォーマット変換 --- ✨\n")
-        json_output = json.dumps(result_data, ensure_ascii=False, indent=2)
-        print(json_output)
+    test_id = "202406030811" # 皐月賞
+    scrape_netkeiba_shutuba(test_id)

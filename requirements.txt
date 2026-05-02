@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+pandas
+google-generativeai
+beautifulsoup4
+requests
+selenium
+webdriver-manager
